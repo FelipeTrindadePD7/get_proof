@@ -3,11 +3,13 @@ import re
 import sys
 import threading
 import time
+import json
 from pathlib import Path
 from datetime import timedelta
 import shutil
 import subprocess
 import platform
+import unicodedata
 
 try:
     import pandas as pd
@@ -48,7 +50,22 @@ def extract_pdf_pages(pdf_path):
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages):
             text = page.extract_text() or ""
-            pages[i] = {'text': text, 'numbers': normalize_account(text)}
+            # Texto normalizado para busca: remove acentos, converte para maiúsculas e colapsa espaços
+            def normalize_search_text(s):
+                if not s:
+                    return ""
+                nf = unicodedata.normalize('NFKD', s)
+                ascii_s = nf.encode('ascii', 'ignore').decode('ascii')
+                # manter apenas letras, dígitos e espaços
+                cleaned = re.sub(r'[^A-Za-z0-9\s]', ' ', ascii_s)
+                cleaned = re.sub(r'\s+', ' ', cleaned).strip().upper()
+                return cleaned
+
+            pages[i] = {
+                'text': text,
+                'numbers': normalize_account(text),
+                'norm_text': normalize_search_text(text)
+            }
     return pages
 
 
@@ -57,40 +74,61 @@ def find_account_pages(conta, nome, pages):
     found = []
     conta_norm = normalize_account(conta)
     conta_original = str(conta).strip()
-    nome_upper = str(nome).upper().strip() if nome else ""
+    # Normalizar nome para busca (remover acentos e pontuação)
+    def normalize_search_text(s):
+        if not s:
+            return ""
+        nf = unicodedata.normalize('NFKD', str(s))
+        ascii_s = nf.encode('ascii', 'ignore').decode('ascii')
+        cleaned = re.sub(r'[^A-Za-z0-9\s]', ' ', ascii_s)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip().upper()
+        return cleaned
+
+    nome_norm = normalize_search_text(nome) if nome else ""
     
     if not conta_norm or len(conta_norm) < 3:
         return found
     
-    if not nome_upper:
+    if not nome_norm:
         return found
     
     # Para cada página, verifica se tem TANTO a conta QUANTO o nome
     for num, data in pages.items():
         text_upper = data['text'].upper()
+        text_norm = data.get('norm_text', '')
         tem_conta = False
         tem_nome = False
         
-        # Verifica se tem a conta (busca 1: com formatação)
-        if conta_original in data['text']:
+        # Verifica se tem a conta (busca 1: conta numérica normalizada no conjunto de dígitos)
+        if conta_norm and conta_norm in data['numbers']:
             tem_conta = True
-        # Busca 2: conta normalizada
-        elif conta_norm in data['numbers']:
-            tem_conta = True
-        # Busca 3: sem dígito verificador (último recurso)
-        elif len(conta_norm) > 4:
+        else:
+            # Tentar encontrar os dígitos da conta no texto permitindo separadores (ex: 12345-6 ou 12 345 6)
+            if conta_norm:
+                pattern = "\\D*".join(list(conta_norm))
+                try:
+                    if re.search(pattern, data['text'] or '', flags=re.DOTALL):
+                        tem_conta = True
+                except re.error:
+                    pass
+        # Busca alternativa: sem dígito verificador (último recurso)
+        if not tem_conta and len(conta_norm) > 4:
             conta_sem_dv = conta_norm[:-1]
             if len(conta_sem_dv) >= 4 and conta_sem_dv in data['numbers']:
                 tem_conta = True
         
-        # Verifica se tem o nome (pode ser parcial para nomes compostos)
-        if nome_upper in text_upper:
+        # Verifica se tem o nome (usar texto normalizado sem acentos)
+        if nome_norm and nome_norm in text_norm:
             tem_nome = True
         else:
             # Tenta verificar partes do nome (min 3 caracteres por parte)
-            partes_nome = [p for p in nome_upper.split() if len(p) >= 3]
-            if partes_nome and all(parte in text_upper for parte in partes_nome):
-                tem_nome = True
+            partes_nome = [p for p in nome_norm.split() if len(p) >= 3]
+            if partes_nome:
+                # exigir pelo menos 2 partes quando o nome possui múltiplas partes, senão 1
+                need = 2 if len(partes_nome) >= 2 else 1
+                matches = sum(1 for parte in partes_nome if parte in text_norm)
+                if matches >= need:
+                    tem_nome = True
         
         # SÓ adiciona se encontrou AMBOS: conta E nome
         if tem_conta and tem_nome:
@@ -137,24 +175,70 @@ def create_pdf(pdf_path, page_numbers, output_path):
                     i += 1
                 target = candidate
 
-            # escrever em arquivo temporário e mover para destino (atomicidade)
-            try:
-                import tempfile
-                dirpath = os.path.dirname(target) or '.'
-                fd, tmpname = tempfile.mkstemp(dir=dirpath, suffix='.pdf')
-                os.close(fd)
-                with open(tmpname, 'wb') as out:
-                    writer.write(out)
-                os.replace(tmpname, target)
-            except Exception:
-                # fallback simples
-                with open(target, 'wb') as out:
-                    writer.write(out)
+            # Tentar salvar com retry (útil para OneDrive/GoogleDrive)
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # escrever em arquivo temporário e mover para destino (atomicidade)
+                    import tempfile
+                    dirpath = os.path.dirname(target) or '.'
+                    
+                    # Garantir que o diretório existe
+                    os.makedirs(dirpath, exist_ok=True)
+                    
+                    fd, tmpname = tempfile.mkstemp(dir=dirpath, suffix='.pdf', prefix='tmp_')
+                    os.close(fd)
+                    
+                    with open(tmpname, 'wb') as out:
+                        writer.write(out)
+                    
+                    # Forçar flush do sistema de arquivos
+                    if hasattr(os, 'sync'):
+                        os.sync()
+                    
+                    # Tentar mover o arquivo
+                    os.replace(tmpname, target)
+                    
+                    # Verificar se o arquivo foi criado com sucesso
+                    if os.path.exists(target) and os.path.getsize(target) > 0:
+                        return True
+                    
+                except PermissionError as e:
+                    # Erro comum com OneDrive/GoogleDrive - tentar novamente após delay
+                    if attempt < max_retries - 1:
+                        time.sleep(0.5 * (attempt + 1))  # Delay progressivo
+                        continue
+                    else:
+                        print(f"Erro de permissão ao salvar PDF (tentativa {attempt + 1}/{max_retries}): {e}")
+                        print(f"Caminho: {target}")
+                        raise
+                
+                except Exception as e:
+                    # Outros erros - tentar fallback direto
+                    if attempt < max_retries - 1:
+                        time.sleep(0.3)
+                        continue
+                    else:
+                        print(f"Erro ao salvar PDF com tempfile (tentativa {attempt + 1}/{max_retries}): {e}")
+                        # Tentar fallback direto
+                        try:
+                            with open(target, 'wb') as out:
+                                writer.write(out)
+                            if os.path.exists(target) and os.path.getsize(target) > 0:
+                                return True
+                        except Exception as e2:
+                            print(f"Erro no fallback direto: {e2}")
+                            print(f"Caminho problemático: {target}")
+                            print(f"Tamanho do caminho: {len(target)} caracteres")
+                            raise
 
             return True
             
     except Exception as e:
-        print(f"Erro criar PDF: {e}")
+        import traceback
+        print(f"❌ Erro criar PDF: {e}")
+        print(f"Caminho de saída: {output_path}")
+        traceback.print_exc()
         return False
     finally:
         # Limpar referências
@@ -165,13 +249,38 @@ def create_pdf(pdf_path, page_numbers, output_path):
 
 
 def clean_filename(name):
-    """Remove caracteres inválidos"""
+    """Remove caracteres inválidos e limita tamanho para evitar problemas com OneDrive/GoogleDrive"""
     if not name or str(name).lower() == 'nan':
         return "sem_nome"
+    
     name = str(name)
-    for c in '<>:"/\\|?*\n\r\t':
+    
+    # Remover/substituir caracteres problemáticos para Windows e serviços de nuvem
+    # OneDrive/GoogleDrive bloqueiam alguns destes caracteres
+    invalid_chars = '<>:"/\\|?*\n\r\t'
+    for c in invalid_chars:
         name = name.replace(c, '_')
-    return ' '.join(name.split())[:100].strip()
+    
+    # Remover caracteres de controle e outros problemáticos
+    name = ''.join(char if ord(char) >= 32 else '_' for char in name)
+    
+    # Remover espaços múltiplos e normalizar
+    name = ' '.join(name.split())
+    
+    # OneDrive não permite nomes terminando com ponto ou espaço
+    name = name.rstrip('. ')
+    
+    # Limitar tamanho (Windows tem limite de 260 chars no caminho total)
+    # Deixar espaço para caminho + extensão
+    max_length = 80  # Reduzido para dar margem ao caminho completo
+    if len(name) > max_length:
+        name = name[:max_length].rstrip('. ')
+    
+    # Se ficou vazio após limpeza, usar nome padrão
+    if not name:
+        name = "sem_nome"
+    
+    return name
 
 
 def find_column(df, names):
@@ -224,17 +333,15 @@ class App:
         """Carrega lista de PDFs já processados"""
         try:
             if os.path.exists(self.processed_pdfs_file):
-                import json
                 with open(self.processed_pdfs_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
-        except:
+        except Exception:
             pass
         return {}
     
     def save_processed_pdfs(self):
         """Salva lista de PDFs processados"""
         try:
-            import json
             with open(self.processed_pdfs_file, 'w', encoding='utf-8') as f:
                 json.dump(self.processed_pdfs, f, indent=2, ensure_ascii=False)
         except Exception as e:
@@ -391,15 +498,14 @@ class App:
                     pdf_count = 0
                 self.write_log(f"✓ Pasta PDFs: {os.path.basename(folder)} ({pdf_count} PDFs)")
             else:
-                self.write_log("ℹ️ Seleção de pasta cancelada pelo usuário.")
+                return
         except Exception as e:
             messagebox.showerror("Erro", f"Erro ao selecionar pasta: {e}")
     
     def get_excel(self):
         """Seleciona arquivo Excel usando explorador nativo do SO"""
         try:
-            arquivo = self._native_select_file("Selecionar Planilha Excel", 
-                                               [("Arquivos Excel", "*.xlsx *.xls"), ("Todos os arquivos", "*.*")])
+            arquivo = self._native_select_file("Selecionar Planilha Excel", [("Todos os arquivos", "*.*")])
             if arquivo:
                 if os.path.isfile(arquivo):
                     self.excel_var.set(arquivo)
@@ -410,7 +516,7 @@ class App:
                     self.write_log("⚠️ Arquivo selecionado não existe.")
                     messagebox.showwarning("Arquivo inválido", "O arquivo selecionado não existe.")
             else:
-                self.write_log("ℹ️ Seleção de arquivo cancelada pelo usuário.")
+                return
         except Exception as e:
             messagebox.showerror("Erro", f"Erro ao selecionar Excel: {e}")
     
@@ -438,19 +544,21 @@ class App:
                 self.last_dir = folder
                 self.write_log(f"✓ Pasta de saída: {folder}")
             else:
-                self.write_log("ℹ️ Seleção de pasta de saída cancelada pelo usuário.")
+                return
         except Exception as e:
             messagebox.showerror("Erro", f"Erro ao selecionar pasta: {e}")
     
     def _native_select_folder(self, title):
         """Seleciona pasta usando o explorador nativo do sistema operacional"""
         sistema = platform.system()
+        attempted_native = False
         
         # Linux - tentar zenity, kdialog, ou yad
         if sistema == "Linux":
             # Tentar zenity primeiro (GNOME)
             if shutil.which('zenity'):
                 try:
+                    attempted_native = True
                     result = subprocess.run(
                         ['zenity', '--file-selection', '--directory', f'--title={title}', f'--filename={self.last_dir}/'],
                         capture_output=True,
@@ -459,15 +567,13 @@ class App:
                     )
                     if result.returncode == 0 and result.stdout.strip():
                         return result.stdout.strip()
-                    else:
-                        # Usuário cancelou
-                        return None
                 except Exception as e:
                     self.write_log(f"⚠️ Erro ao usar zenity: {e}")
             
             # Tentar kdialog (KDE)
             if shutil.which('kdialog'):
                 try:
+                    attempted_native = True
                     result = subprocess.run(
                         ['kdialog', '--getexistingdirectory', self.last_dir, '--title', title],
                         capture_output=True,
@@ -476,15 +582,13 @@ class App:
                     )
                     if result.returncode == 0 and result.stdout.strip():
                         return result.stdout.strip()
-                    else:
-                        # Usuário cancelou
-                        return None
                 except Exception as e:
                     self.write_log(f"⚠️ Erro ao usar kdialog: {e}")
             
             # Tentar yad
             if shutil.which('yad'):
                 try:
+                    attempted_native = True
                     result = subprocess.run(
                         ['yad', '--file-selection', '--directory', f'--title={title}', f'--filename={self.last_dir}/'],
                         capture_output=True,
@@ -493,25 +597,28 @@ class App:
                     )
                     if result.returncode == 0 and result.stdout.strip():
                         return result.stdout.strip()
-                    else:
-                        # Usuário cancelou
-                        return None
                 except Exception as e:
                     self.write_log(f"⚠️ Erro ao usar yad: {e}")
         
-        # Windows - usar powershell com FolderBrowserDialog
+        # Windows - usar powershell com OpenFileDialog (configurado para selecionar pasta)
         elif sistema == "Windows":
             try:
+                attempted_native = True
+                last_dir_esc = self.last_dir.replace('/', '\\\\')
+                # Usar OpenFileDialog configurado para permitir seleção de pasta
                 script = f'''
-Add-Type -AssemblyName System.Windows.Forms
-$folder = New-Object System.Windows.Forms.FolderBrowserDialog
-$folder.Description = "{title}"
-$folder.SelectedPath = "{self.last_dir.replace('/', '\\\\')}"
-$folder.ShowNewFolderButton = $true
-if ($folder.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
-    Write-Output $folder.SelectedPath
-}}
-'''
+                            Add-Type -AssemblyName System.Windows.Forms
+                            $dlg = New-Object System.Windows.Forms.OpenFileDialog
+                            $dlg.Title = "{title}"
+                            $dlg.InitialDirectory = "{last_dir_esc}"
+                            $dlg.ValidateNames = $false
+                            $dlg.CheckFileExists = $false
+                            $dlg.FileName = 'Select Folder'
+                            if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+                                $path = Split-Path $dlg.FileName
+                                Write-Output $path
+                            }}
+                            '''
                 result = subprocess.run(
                     ['powershell', '-NoProfile', '-Command', script],
                     capture_output=True,
@@ -520,9 +627,6 @@ if ($folder.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
                 )
                 if result.returncode == 0 and result.stdout.strip():
                     return result.stdout.strip()
-                else:
-                    # Usuário cancelou
-                    return None
             except Exception as e:
                 self.write_log(f"⚠️ Erro ao usar explorador nativo Windows: {e}")
         
@@ -542,19 +646,19 @@ if ($folder.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
                     if mac_path.startswith('alias '):
                         mac_path = mac_path[6:]
                     return mac_path.replace(':', '/')
-                else:
-                    # Usuário cancelou
-                    return None
             except Exception as e:
                 self.write_log(f"⚠️ Erro ao usar explorador nativo macOS: {e}")
         
-        # Fallback para tkinter (pode não ser nativo mas funciona em todos os SOs)
-        self.write_log("ℹ️ Usando diálogo tkinter (explorador nativo não disponível)")
+        # Se já tentamos um diálogo nativo, tratar como cancelado e não abrir tkinter
+        if attempted_native:
+            return None
+
         return filedialog.askdirectory(initialdir=self.last_dir, title=title)
     
     def _native_select_file(self, title, filetypes):
         """Seleciona arquivo usando o explorador nativo do sistema operacional"""
         sistema = platform.system()
+        attempted_native = False
         
         # Linux - tentar zenity, kdialog, ou yad
         if sistema == "Linux":
@@ -567,6 +671,7 @@ if ($folder.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
             # Tentar zenity primeiro (GNOME)
             if shutil.which('zenity'):
                 try:
+                    attempted_native = True
                     cmd = ['zenity', '--file-selection', f'--title={title}', f'--filename={self.last_dir}/'] + filter_args
                     result = subprocess.run(
                         cmd,
@@ -576,15 +681,13 @@ if ($folder.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
                     )
                     if result.returncode == 0 and result.stdout.strip():
                         return result.stdout.strip()
-                    else:
-                        # Usuário cancelou
-                        return None
                 except Exception as e:
                     self.write_log(f"⚠️ Erro ao usar zenity: {e}")
             
             # Tentar kdialog (KDE)
             if shutil.which('kdialog'):
                 try:
+                    attempted_native = True
                     # Construir filtro para kdialog
                     filter_str = " ".join([pattern for _, pattern in filetypes if pattern != "*.*"])
                     result = subprocess.run(
@@ -595,15 +698,13 @@ if ($folder.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
                     )
                     if result.returncode == 0 and result.stdout.strip():
                         return result.stdout.strip()
-                    else:
-                        # Usuário cancelou
-                        return None
                 except Exception as e:
                     self.write_log(f"⚠️ Erro ao usar kdialog: {e}")
             
             # Tentar yad
             if shutil.which('yad'):
                 try:
+                    attempted_native = True
                     cmd = ['yad', '--file-selection', f'--title={title}', f'--filename={self.last_dir}/'] + filter_args
                     result = subprocess.run(
                         cmd,
@@ -613,15 +714,13 @@ if ($folder.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
                     )
                     if result.returncode == 0 and result.stdout.strip():
                         return result.stdout.strip()
-                    else:
-                        # Usuário cancelou
-                        return None
                 except Exception as e:
                     self.write_log(f"⚠️ Erro ao usar yad: {e}")
         
         # Windows - usar powershell com OpenFileDialog
         elif sistema == "Windows":
             try:
+                attempted_native = True
                 # Construir filtro de tipos
                 filter_parts = []
                 for name, pattern in filetypes:
@@ -629,16 +728,17 @@ if ($folder.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
                         filter_parts.append(f"{name}|{pattern}")
                 filter_str = "|".join(filter_parts) if filter_parts else "Todos os arquivos|*.*"
                 
+                last_dir_esc = self.last_dir.replace('/', '\\\\')
                 script = f'''
-Add-Type -AssemblyName System.Windows.Forms
-$file = New-Object System.Windows.Forms.OpenFileDialog
-$file.Title = "{title}"
-$file.InitialDirectory = "{self.last_dir.replace('/', '\\\\')}"
-$file.Filter = "{filter_str}"
-if ($file.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
-    Write-Output $file.FileName
-}}
-'''
+                            Add-Type -AssemblyName System.Windows.Forms
+                            $file = New-Object System.Windows.Forms.OpenFileDialog
+                            $file.Title = "{title}"
+                            $file.InitialDirectory = "{last_dir_esc}"
+                            $file.Filter = "{filter_str}"
+                            if ($file.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+                                Write-Output $file.FileName
+                            }}
+                            '''
                 result = subprocess.run(
                     ['powershell', '-NoProfile', '-Command', script],
                     capture_output=True,
@@ -647,9 +747,6 @@ if ($file.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
                 )
                 if result.returncode == 0 and result.stdout.strip():
                     return result.stdout.strip()
-                else:
-                    # Usuário cancelou
-                    return None
             except Exception as e:
                 self.write_log(f"⚠️ Erro ao usar explorador nativo Windows: {e}")
         
@@ -678,14 +775,13 @@ if ($file.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
                     if mac_path.startswith('alias '):
                         mac_path = mac_path[6:]
                     return mac_path.replace(':', '/')
-                else:
-                    # Usuário cancelou
-                    return None
             except Exception as e:
                 self.write_log(f"⚠️ Erro ao usar explorador nativo macOS: {e}")
         
-        # Fallback para tkinter
-        self.write_log("ℹ️ Usando diálogo tkinter (explorador nativo não disponível)")
+        # Se já tentamos um diálogo nativo, tratar como cancelado e não abrir tkinter
+        if attempted_native:
+            return None
+        
         return filedialog.askopenfilename(initialdir=self.last_dir, title=title, filetypes=filetypes)
     
     def validate_pdf_folder(self):
@@ -715,11 +811,15 @@ if ($file.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
             self.write_log(f"✓ Pasta: {path}")
     
     def write_log(self, msg):
-        self.log.config(state='normal')
-        self.log.insert(tk.END, msg + "\n")
-        self.log.see(tk.END)
-        self.log.config(state='disabled')
-        self.root.update()
+        try:
+            self.log.config(state='normal')
+            self.log.insert(tk.END, msg + "\n")
+            self.log.see(tk.END)
+            self.log.config(state='disabled')
+            self.root.update()
+        except Exception:
+            # Fallback se a janela não estiver disponível
+            print(msg)
 
     def clear_processed_history(self):
         """Apaga o histórico de PDFs processados (arquivo e memória)"""
@@ -761,11 +861,34 @@ if ($file.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
             nome_col = self.nome_col
             ccusto_col = self.ccusto_col
             
+            # Verificar se é pasta do OneDrive/GoogleDrive e avisar
+            out_dir_lower = out_dir.lower()
+            is_cloud_folder = any(cloud in out_dir_lower for cloud in ['onedrive', 'google drive', 'googledrive', 'dropbox', 'icloud'])
+            
+            if is_cloud_folder:
+                self.write_log("\n⚠️ AVISO: Detectada pasta de sincronização na nuvem!")
+                self.write_log("   (OneDrive/GoogleDrive/Dropbox/iCloud)")
+                self.write_log("   Pode haver conflitos durante o salvamento dos PDFs.")
+                self.write_log("   Recomenda-se usar uma pasta local para melhor desempenho.\n")
+            
             Path(out_dir).mkdir(parents=True, exist_ok=True)
             
             self.write_log("\n" + "="*50)
             self.write_log("🚀 Iniciando processamento...")
             self.write_log("="*50)
+            
+            # Verificar permissões de escrita
+            try:
+                test_file = os.path.join(out_dir, '.test_write_permission')
+                with open(test_file, 'w') as f:
+                    f.write('test')
+                os.remove(test_file)
+                self.write_log(f"✓ Permissões de escrita verificadas em: {out_dir}")
+            except Exception as e:
+                self.write_log(f"❌ ERRO: Sem permissão de escrita na pasta de saída!")
+                self.write_log(f"   Pasta: {out_dir}")
+                self.write_log(f"   Erro: {e}")
+                raise PermissionError(f"Sem permissão de escrita em: {out_dir}")
             
             # Listar todos os PDFs na pasta
             pdf_files = [f for f in os.listdir(pdf_folder) if f.lower().endswith('.pdf')]
@@ -874,17 +997,33 @@ if ($file.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
                                 self.write_log(f"⚠️ Conta {conta_str} em {len(paginas)} páginas: {[p+1 for p in paginas]}")
                             
                             out = os.path.join(out_dir, f"{ccusto_str}_{nome_str}.pdf")
+                            
+                            # Verificar se o caminho é muito longo (problema no Windows/OneDrive)
+                            if len(out) > 240:  # Deixar margem
+                                self.write_log(f"⚠️ Caminho muito longo ({len(out)} chars), truncando nome...")
+                                # Reduzir nome mantendo só primeiros caracteres
+                                nome_curto = nome_str[:30]
+                                ccusto_curto = ccusto_str[:30]
+                                out = os.path.join(out_dir, f"{ccusto_curto}_{nome_curto}.pdf")
+                            
                             i = 1
                             while os.path.exists(out):
                                 out = os.path.join(out_dir, f"{ccusto_str}_{nome_str}_{i}.pdf")
                                 i += 1
                             
-                            if create_pdf(pdf_path, paginas, out):
-                                self.write_log(f"✓ {ccusto_str}_{nome_str} (pág {[p+1 for p in paginas]})")
-                                ok += 1
-                                # Marcar que esta conta foi encontrada
-                                contas_encontradas.add(conta_str)
-                            else:
+                            try:
+                                if create_pdf(pdf_path, paginas, out):
+                                    self.write_log(f"✓ {ccusto_str}_{nome_str} (pág {[p+1 for p in paginas]})")
+                                    ok += 1
+                                    # Marcar que esta conta foi encontrada
+                                    contas_encontradas.add(conta_str)
+                                else:
+                                    self.write_log(f"❌ FALHA ao salvar PDF: {ccusto_str}_{nome_str}")
+                                    self.write_log(f"   Caminho: {out}")
+                                    nok += 1
+                            except Exception as e_pdf:
+                                self.write_log(f"❌ ERRO ao criar PDF para {conta_str}: {e_pdf}")
+                                self.write_log(f"   Caminho problemático: {out}")
                                 nok += 1
                     
                     # Registrar PDF como processado
