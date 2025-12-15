@@ -31,7 +31,7 @@ jobs:
             pip install pyinstaller pandas openpyxl xlrd pdfplumber PyPDF2
           }
         shell: powershell
-        
+
       - name: Build exe with PyInstaller
         shell: bash
         run: |
@@ -44,7 +44,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: get_proof-windows
+          name: Extrator de PDF
           path: |
             dist/get_proof.exe
             dist/get_proof.zip

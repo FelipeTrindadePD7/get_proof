@@ -1091,15 +1091,20 @@ class App:
                 nome_str = clean_filename(item['nome'])
                 ccusto_str = clean_filename(item['ccusto'])
                 
-                out_path = os.path.join(out_dir, f"{ccusto_str}_{nome_str}_manual.pdf")
+                # Criar subpasta para o centro de custo
+                ccusto_folder = os.path.join(out_dir, ccusto_str)
+                Path(ccusto_folder).mkdir(parents=True, exist_ok=True)
+                
+                # Salvar na pasta do ccusto (mantém prefixo de ccusto, com sufixo _manual)
+                out_path = os.path.join(ccusto_folder, f"{ccusto_str}_{nome_str}_manual.pdf")
                 i = 1
                 while os.path.exists(out_path):
-                    out_path = os.path.join(out_dir, f"{ccusto_str}_{nome_str}_manual_{i}.pdf")
+                    out_path = os.path.join(ccusto_folder, f"{ccusto_str}_{nome_str}_manual_{i}.pdf")
                     i += 1
                 
                 if create_pdf(pdf_path, [match['page']], out_path):
                     success_count += 1
-                    self.write_log(f"✓ Extraído manualmente: {ccusto_str}_{nome_str} (pág {match['page'] + 1})")
+                    self.write_log(f"✓ Extraído manualmente: {ccusto_str}/{ccusto_str}_{nome_str}_manual (pág {match['page'] + 1})")
             
             messagebox.showinfo("Sucesso", f"{success_count} comprovante(s) extraído(s) com sucesso!")
             status_var.set(f"Extraídos {success_count} comprovantes")
@@ -1649,14 +1654,19 @@ class App:
                             for pag in paginas_novas:
                                 paginas_com_match.add(f"{pdf_name}|{pag}")
                             
-                            out = os.path.join(out_dir, f"{ccusto_str}_{nome_str}.pdf")
+                            # Criar subpasta para o centro de custo
+                            ccusto_folder = os.path.join(out_dir, ccusto_str)
+                            Path(ccusto_folder).mkdir(parents=True, exist_ok=True)
+                            
+                            # Salvar PDF na pasta do centro de custo (mantém prefixo de ccusto no nome)
+                            out = os.path.join(ccusto_folder, f"{ccusto_str}_{nome_str}.pdf")
                             i = 1
                             while os.path.exists(out):
-                                out = os.path.join(out_dir, f"{ccusto_str}_{nome_str}_{i}.pdf")
+                                out = os.path.join(ccusto_folder, f"{ccusto_str}_{nome_str}_{i}.pdf")
                                 i += 1
                             
                             if create_pdf(pdf_path, paginas_novas, out):
-                                self.write_log(f"✓ {ccusto_str}_{nome_str} (pág {[p+1 for p in paginas_novas]})")
+                                self.write_log(f"✓ {ccusto_str}/{ccusto_str}_{nome_str} (pág {[p+1 for p in paginas_novas]})")
                                 ok += 1
                                 # Marcar que esta conta foi encontrada
                                 contas_encontradas.add(conta_str)
