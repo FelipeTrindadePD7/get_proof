@@ -25,8 +25,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install pandas PyPDF2 pdfplumber pyinstaller openpyxl xlrd; fi
-
+          if (Test-Path 'requirements.txt') {
+            pip install -r requirements.txt
+          } else {
+            pip install pyinstaller pandas openpyxl xlrd pdfplumber PyPDF2
+          }
+        shell: powershell
+        
       - name: Build exe with PyInstaller
         shell: bash
         run: |
