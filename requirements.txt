@@ -3,4 +3,5 @@ openpyxl
 xlrd
 PyPDF2
 pdfplumber
+Pillow
 pyinstaller

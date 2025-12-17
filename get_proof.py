@@ -32,9 +32,17 @@ except ImportError:
 try:
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox, scrolledtext
+    from PIL import Image, ImageTk
 except ImportError:
-    print("Erro: tkinter não instalado")
-    sys.exit(1)
+    try:
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox, scrolledtext
+        # PIL not available, will work without logo
+        Image = None
+        ImageTk = None
+    except ImportError:
+        print("Erro: tkinter não instalado")
+        sys.exit(1)
 
 
 def normalize_account(conta):
@@ -393,9 +401,27 @@ def find_column(df, names):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Extrator de Comprovantes PDF")
-        self.root.geometry("900x700")
-        self.root.minsize(800, 600)
+        self.root.title("PD7Lab - Extrator de Comprovantes PDF v1.0.0")
+        self.root.geometry("950x750")
+        self.root.minsize(850, 650)
+        
+        # PD7Lab Color Palette (from logo)
+        self.colors = {
+            'primary_blue': '#00D4FF',      # Cyan blue from logo
+            'dark_blue': '#0099CC',         # Darker shade
+            'accent_blue': '#0AEAFF',       # Lighter cyan
+            'white': '#F8F8F8',             # Off-white (slightly darker)
+            'light_gray': '#F5F5F5',
+            'medium_gray': '#E0E0E0',
+            'dark_gray': '#424242',
+            'text_dark': '#212121',
+            'success': '#4CAF50',
+            'warning': '#FF9800',
+            'error': '#F44336'
+        }
+        
+        # Set window background
+        self.root.configure(bg=self.colors['white'])
         
         self.pdf_folder_var = tk.StringVar()
         self.excel_var = tk.StringVar()
@@ -417,6 +443,9 @@ class App:
         self.start_time = None
         self.timer_running = False
         self.timer_label = None
+        
+        # Logo image
+        self.logo_image = None
         
         # Histórico de PDFs processados
         self.processed_pdfs_file = "pdfs_processados.json"
@@ -451,106 +480,234 @@ class App:
             return None
     
     def setup_ui(self):
-        # Apply a clean ttk style
+        # Apply PD7Lab themed style
         try:
             style = ttk.Style(self.root)
-            # Prefer a neutral theme if available
-            for t in ("clam", "alt", "default"):
-                try:
-                    style.theme_use(t)
-                    break
-                except Exception:
-                    pass
-            style.configure('TLabel', font=('Segoe UI', 10))
-            style.configure('TButton', font=('Segoe UI', 10))
-            style.configure('Header.TLabel', font=('Segoe UI', 16, 'bold'))
-            style.configure('Accent.TButton', font=('Segoe UI', 11, 'bold'), foreground='#ffffff', background='#0078D7')
-            style.map('Accent.TButton', background=[('active', '#005A9E')])
-        except Exception:
-            # ignore style errors on restricted environments
+            # Use clam theme as base for better customization
+            try:
+                style.theme_use("clam")
+            except:
+                pass
+            
+            # Configure colors based on PD7Lab palette
+            style.configure('TLabel', 
+                          font=('Segoe UI', 10), 
+                          background=self.colors['white'],
+                          foreground=self.colors['text_dark'])
+            
+            style.configure('TButton', 
+                          font=('Segoe UI', 10),
+                          borderwidth=1,
+                          relief='flat',
+                          background=self.colors['medium_gray'],
+                          foreground=self.colors['text_dark'])
+            style.map('TButton', 
+                     background=[('active', self.colors['primary_blue']),
+                               ('pressed', self.colors['dark_blue'])],
+                     foreground=[('active', self.colors['white'])])
+            
+            # Header style with PD7Lab blue
+            style.configure('Header.TLabel', 
+                          font=('Segoe UI', 18, 'bold'),
+                          background=self.colors['white'],
+                          foreground=self.colors['primary_blue'])
+            
+            # Accent button with PD7Lab colors
+            style.configure('Accent.TButton', 
+                          font=('Segoe UI', 11, 'bold'),
+                          borderwidth=0,
+                          relief='flat',
+                          background=self.colors['primary_blue'],
+                          foreground=self.colors['white'],
+                          padding=(20, 10))
+            style.map('Accent.TButton', 
+                     background=[('active', self.colors['accent_blue']),
+                               ('pressed', self.colors['dark_blue'])],
+                     foreground=[('active', self.colors['white']),
+                               ('pressed', self.colors['white'])])
+            
+            # Frame styles
+            style.configure('TFrame', background=self.colors['white'])
+            style.configure('TLabelframe', 
+                          background=self.colors['white'],
+                          foreground=self.colors['dark_gray'],
+                          borderwidth=2,
+                          relief='groove')
+            style.configure('TLabelframe.Label', 
+                          font=('Segoe UI', 10, 'bold'),
+                          background=self.colors['white'],
+                          foreground=self.colors['primary_blue'])
+            
+            # Entry style
+            style.configure('TEntry',
+                          fieldbackground=self.colors['white'],
+                          foreground=self.colors['text_dark'],
+                          borderwidth=1)
+            
+            # Checkbutton style
+            style.configure('TCheckbutton',
+                          background=self.colors['white'],
+                          foreground=self.colors['text_dark'])
+            
+            # Progressbar with PD7Lab blue
+            style.configure('TProgressbar',
+                          troughcolor=self.colors['medium_gray'],
+                          background=self.colors['primary_blue'],
+                          borderwidth=0,
+                          thickness=20)
+            
+        except Exception as e:
+            # Fallback if styling fails
+            print(f"Style warning: {e}")
             pass
 
-        # Main container
-        main = ttk.Frame(self.root, padding=(12, 12))
+        # Main container with white background
+        main = ttk.Frame(self.root, padding=(15, 15))
         main.pack(fill=tk.BOTH, expand=True)
 
-        # Header
-        header = ttk.Label(main, text="Extrator de Comprovantes", style='Header.TLabel')
-        header.pack(pady=(6, 12))
-        files = ttk.LabelFrame(main, text="📁 Arquivos", padding=12)
-        files.pack(fill=tk.X, pady=6)
+        # Header with logo
+        header_frame = ttk.Frame(main)
+        header_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # Try to load and display logo
+        try:
+            if Image and ImageTk:
+                logo_path = os.path.join(os.path.dirname(__file__), 'pd7lab-dark.jpeg')
+                if os.path.exists(logo_path):
+                    logo_img = Image.open(logo_path)
+                    # Resize logo to fit header (height ~60px)
+                    aspect_ratio = logo_img.width / logo_img.height
+                    new_height = 60
+                    new_width = int(new_height * aspect_ratio)
+                    logo_img = logo_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                    self.logo_image = ImageTk.PhotoImage(logo_img)
+                    
+                    logo_label = ttk.Label(header_frame, image=self.logo_image, background=self.colors['white'])
+                    logo_label.pack(side=tk.LEFT, padx=(0, 15))
+        except Exception as e:
+            print(f"Logo loading warning: {e}")
+            pass
+        
+        # Header text
+        header_text_frame = ttk.Frame(header_frame)
+        header_text_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        header = ttk.Label(header_text_frame, text="Extrator de Comprovantes PDF v1.0.0", style='Header.TLabel')
+        header.pack(anchor=tk.W)
+        
+        subtitle = ttk.Label(header_text_frame, 
+                           text="Automatize a extração de comprovantes bancários", 
+                           font=('Segoe UI', 9, 'italic'),
+                           foreground=self.colors['dark_gray'])
+        subtitle.pack(anchor=tk.W)
+        
+        # Separator line
+        separator = tk.Frame(main, height=2, bg=self.colors['primary_blue'])
+        separator.pack(fill=tk.X, pady=(0, 15))
+        
+        # Files section with custom styling
+        files = ttk.LabelFrame(main, text="📁 Arquivos", padding=15)
+        files.pack(fill=tk.X, pady=(0, 10))
 
         # Layout: label | entry | button
         files.columnconfigure(1, weight=1)
 
-        ttk.Label(files, text="Pasta PDFs:").grid(row=0, column=0, sticky=tk.W, padx=(4, 8), pady=6)
-        pdf_entry = ttk.Entry(files, textvariable=self.pdf_folder_var)
-        pdf_entry.grid(row=0, column=1, sticky='ew', padx=(0, 8), pady=6)
+        ttk.Label(files, text="Pasta PDFs:").grid(row=0, column=0, sticky=tk.W, padx=(4, 12), pady=8)
+        pdf_entry = ttk.Entry(files, textvariable=self.pdf_folder_var, font=('Segoe UI', 10))
+        pdf_entry.grid(row=0, column=1, sticky='ew', padx=(0, 10), pady=8, ipady=4)
         pdf_entry.bind('<Return>', lambda e: self.validate_pdf_folder())
-        ttk.Button(files, text="Procurar...", width=14, command=self.get_pdf_folder).grid(row=0, column=2, padx=(0,4), pady=6)
+        ttk.Button(files, text="Procurar...", width=14, command=self.get_pdf_folder).grid(row=0, column=2, padx=(0,4), pady=8)
 
-        ttk.Label(files, text="Planilha Excel:").grid(row=1, column=0, sticky=tk.W, padx=(4, 8), pady=6)
-        excel_entry = ttk.Entry(files, textvariable=self.excel_var)
-        excel_entry.grid(row=1, column=1, sticky='ew', padx=(0, 8), pady=6)
+        ttk.Label(files, text="Planilha Excel:").grid(row=1, column=0, sticky=tk.W, padx=(4, 12), pady=8)
+        excel_entry = ttk.Entry(files, textvariable=self.excel_var, font=('Segoe UI', 10))
+        excel_entry.grid(row=1, column=1, sticky='ew', padx=(0, 10), pady=8, ipady=4)
         excel_entry.bind('<Return>', lambda e: self.validate_excel())
-        ttk.Button(files, text="Procurar...", width=14, command=self.get_excel).grid(row=1, column=2, padx=(0,4), pady=6)
+        ttk.Button(files, text="Procurar...", width=14, command=self.get_excel).grid(row=1, column=2, padx=(0,4), pady=8)
 
-        ttk.Label(files, text="Pasta de Saída:").grid(row=2, column=0, sticky=tk.W, padx=(4, 8), pady=6)
-        out_entry = ttk.Entry(files, textvariable=self.out_var)
-        out_entry.grid(row=2, column=1, sticky='ew', padx=(0, 8), pady=6)
+        ttk.Label(files, text="Pasta de Saída:").grid(row=2, column=0, sticky=tk.W, padx=(4, 12), pady=8)
+        out_entry = ttk.Entry(files, textvariable=self.out_var, font=('Segoe UI', 10))
+        out_entry.grid(row=2, column=1, sticky='ew', padx=(0, 10), pady=8, ipady=4)
         out_entry.bind('<Return>', lambda e: self.validate_out())
-        ttk.Button(files, text="Procurar...", width=14, command=self.get_out).grid(row=2, column=2, padx=(0,4), pady=6)
+        ttk.Button(files, text="Procurar...", width=14, command=self.get_out).grid(row=2, column=2, padx=(0,4), pady=8)
 
-        # Status / timer row
-        status_row = ttk.Frame(main)
-        status_row.pack(fill=tk.X, pady=(10,4))
-        self.timer_label = ttk.Label(status_row, text="⏱️ Tempo: 00:00:00.000")
+        # Status / timer row with colored background
+        status_row = tk.Frame(main, bg=self.colors['light_gray'], relief='flat', bd=0)
+        status_row.pack(fill=tk.X, pady=(10, 8))
+        
+        status_inner = tk.Frame(status_row, bg=self.colors['light_gray'])
+        status_inner.pack(fill=tk.X, padx=10, pady=8)
+        
+        self.timer_label = tk.Label(status_inner, 
+                                    text="⏱️ Tempo: 00:00:00.000",
+                                    font=('Segoe UI', 10, 'bold'),
+                                    bg=self.colors['light_gray'],
+                                    fg=self.colors['primary_blue'])
         self.timer_label.pack(side=tk.LEFT)
 
         # Options frame for reprocess controls
-        options_frame = ttk.LabelFrame(main, text="⚙️ Opções de Processamento", padding=8)
-        options_frame.pack(fill=tk.X, pady=(6,4))
+        options_frame = ttk.LabelFrame(main, text="⚙️ Opções de Processamento", padding=12)
+        options_frame.pack(fill=tk.X, pady=(8, 10))
         
         try:
             chk = ttk.Checkbutton(options_frame, text="Ignorar histórico (forçar reprocessamento)", 
                                  variable=self.force_reprocess_var)
-            chk.pack(side=tk.LEFT, padx=(4,8))
+            chk.pack(side=tk.LEFT, padx=(4, 12))
             
             chk_debug = ttk.Checkbutton(options_frame, text="🔧 Debug", 
                                        variable=self.debug_mode_var)
-            chk_debug.pack(side=tk.LEFT, padx=(0,8))
+            chk_debug.pack(side=tk.LEFT, padx=(0, 12))
             
             ttk.Button(options_frame, text="🗑️ Limpar Histórico", 
-                      command=self.clear_processed_history, width=18).pack(side=tk.LEFT, padx=(0,4))
+                      command=self.clear_processed_history, width=18).pack(side=tk.LEFT, padx=(0, 6))
             ttk.Button(options_frame, text="🔍 Buscar Não Encontrados", 
-                      command=self.search_missing, width=24).pack(side=tk.LEFT, padx=(4,4))
+                      command=self.search_missing, width=24).pack(side=tk.LEFT, padx=(6, 4))
         except Exception:
             # ignore if style/ttk not available
             pass
 
-        # Process button and progress
+        # Process button and progress with enhanced styling
         controls = ttk.Frame(main)
-        controls.pack(fill=tk.X, pady=(10,4))
-        # Accent styled button (fall back to default if style not available)
-        try:
-            self.btn = ttk.Button(controls, text="▶ PROCESSAR COMPROVANTES", command=self.start, style='Accent.TButton')
-        except Exception:
-            self.btn = ttk.Button(controls, text="▶ PROCESSAR COMPROVANTES", command=self.start)
-        self.btn.pack(side=tk.LEFT, padx=(0,10))
+        controls.pack(fill=tk.X, pady=(12, 8))
+        
+        # Main action button with PD7Lab styling
+        self.btn = ttk.Button(controls, text="▶ PROCESSAR COMPROVANTES", 
+                             command=self.start, style='Accent.TButton')
+        self.btn.pack(side=tk.LEFT, padx=(0, 15))
 
         self.prog = ttk.Progressbar(controls, mode='indeterminate', length=400)
-        self.prog.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,10))
+        self.prog.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 15))
 
         # Status label to the right
         self.status_var = tk.StringVar(value="Pronto")
-        status_label = ttk.Label(controls, textvariable=self.status_var, font=('Segoe UI', 9, 'italic'))
+        status_label = ttk.Label(controls, 
+                                textvariable=self.status_var, 
+                                font=('Segoe UI', 9, 'italic'),
+                                foreground=self.colors['dark_gray'])
         status_label.pack(side=tk.LEFT)
 
-        # Log area
-        logf = ttk.LabelFrame(main, text="📋 Log de Processamento", padding=8)
-        logf.pack(fill=tk.BOTH, expand=True, pady=(10,0))
-        self.log = scrolledtext.ScrolledText(logf, height=12, state='disabled', font=('Courier New', 10))
+        # Log area with styled frame
+        logf = ttk.LabelFrame(main, text="📋 Log de Processamento", padding=10)
+        logf.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        
+        # Create text widget with custom colors
+        self.log = scrolledtext.ScrolledText(logf, 
+                                            height=12, 
+                                            state='disabled', 
+                                            font=('Consolas', 9),
+                                            bg=self.colors['white'],
+                                            fg=self.colors['text_dark'],
+                                            relief='flat',
+                                            borderwidth=1,
+                                            highlightthickness=1,
+                                            highlightbackground=self.colors['medium_gray'],
+                                            wrap=tk.WORD)
         self.log.pack(fill=tk.BOTH, expand=True)
+        
+        # Configure text tags for colored log messages
+        self.log.tag_config('success', foreground=self.colors['success'], font=('Consolas', 9, 'bold'))
+        self.log.tag_config('error', foreground=self.colors['error'], font=('Consolas', 9, 'bold'))
+        self.log.tag_config('warning', foreground=self.colors['warning'], font=('Consolas', 9, 'bold'))
+        self.log.tag_config('info', foreground=self.colors['primary_blue'], font=('Consolas', 9, 'bold'))
     
     def update_timer(self):
         """Atualiza o cronômetro a cada 100ms"""
