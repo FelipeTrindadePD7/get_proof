@@ -19,11 +19,11 @@ call venv\Scripts\activate.bat
 REM Instalar dependências
 echo Instalando dependencias...
 pip install --upgrade pip
-pip install pandas openpyxl xlrd PyPDF2 pdfplumber pyinstaller
+pip install pandas openpyxl xlrd PyPDF2 pdfplumber Pillow pyinstaller
 
 REM Criar executável
 echo Compilando executavel...
-pyinstaller --onefile --windowed --name="Extrator_Comprovantes" get_proof.py
+pyinstaller build_windows.spec
 
 REM Desativar ambiente virtual
 deactivate
@@ -33,10 +33,10 @@ echo ====================================
 echo Executavel criado com sucesso!
 echo ====================================
 echo.
-echo Localizacao: dist\Extrator_Comprovantes.exe
+echo Localizacao: dist\PD7Lab_ExtractorPDF.exe
 echo.
 echo Para distribuir:
-echo   - Copie o arquivo dist\Extrator_Comprovantes.exe para outras maquinas Windows
+echo   - Copie o arquivo dist\PD7Lab_ExtractorPDF.exe para outras maquinas Windows
 echo   - Duplo clique no .exe para executar
 echo.
 pause

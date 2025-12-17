@@ -45,6 +45,553 @@ except ImportError:
         sys.exit(1)
 
 
+# ==================== RESOURCE PATH HELPER ====================
+
+def resource_path(relative_path):
+    """
+    Obtém o caminho absoluto para recursos, funciona tanto em desenvolvimento
+    quanto quando empacotado pelo PyInstaller.
+    
+    Quando o PyInstaller cria um executável, ele descompacta os recursos em uma
+    pasta temporária e armazena o caminho em sys._MEIPASS.
+    """
+    try:
+        # PyInstaller cria uma pasta temp e armazena o caminho em _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        # Em desenvolvimento, usa o diretório atual
+        base_path = os.path.abspath(".")
+    
+    return os.path.join(base_path, relative_path)
+
+
+# ==================== GOOGLE DRIVE UPLOAD DIALOGS ====================
+
+class DriveUploadDialog:
+    """Janela de revisão e configuração antes do upload"""
+    
+    def __init__(self, parent, app, source_folder, file_summary):
+        self.parent = parent
+        self.app = app
+        self.source_folder = source_folder
+        self.file_summary = file_summary
+        self.result = None
+        
+        # Criar janela
+        self.window = tk.Toplevel(parent)
+        self.window.title("📤 Enviar para Google Drive")
+        self.window.geometry("800x700")
+        self.window.transient(parent)
+        self.window.grab_set()
+        
+        # Centralizar na tela
+        self.window.update_idletasks()
+        x = (self.window.winfo_screenwidth() // 2) - (800 // 2)
+        y = (self.window.winfo_screenheight() // 2) - (700 // 2)
+        self.window.geometry(f"+{x}+{y}")
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        # Container principal
+        main = ttk.Frame(self.window, padding=20)
+        main.pack(fill=tk.BOTH, expand=True)
+        
+        # CABEÇALHO
+        header_frame = ttk.Frame(main)
+        header_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        ttk.Label(header_frame, 
+                 text="📤 Enviar Comprovantes para Google Drive",
+                 font=('Segoe UI', 16, 'bold'),
+                 foreground=self.app.colors['primary_blue']).pack()
+        
+        ttk.Label(header_frame,
+                 text="Revise os arquivos e selecione o destino antes de enviar",
+                 font=('Segoe UI', 10),
+                 foreground=self.app.colors['dark_gray']).pack()
+        
+        # RESUMO
+        summary_frame = ttk.LabelFrame(main, text="📊 Resumo", padding=15)
+        summary_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        info_text = f"""📁 Pasta origem: {os.path.basename(self.source_folder)}
+📄 Total de arquivos: {self.file_summary['total_files']}
+📂 Centros de custo: {self.file_summary['total_folders']}
+💾 Tamanho total: {self.app.format_size(self.file_summary['total_size'])}"""
+        
+        ttk.Label(summary_frame, text=info_text, justify=tk.LEFT).pack(anchor=tk.W)
+        
+        # LISTA DE PASTAS
+        list_frame = ttk.LabelFrame(main, text="📋 Arquivos por Centro de Custo", padding=15)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        
+        # TreeView
+        tree_container = ttk.Frame(list_frame)
+        tree_container.pack(fill=tk.BOTH, expand=True)
+        
+        tree = ttk.Treeview(tree_container, 
+                           columns=('files', 'size'),
+                           show='tree headings',
+                           selectmode='none')
+        
+        tree.heading('#0', text='Centro de Custo')
+        tree.heading('files', text='Arquivos')
+        tree.heading('size', text='Tamanho')
+        
+        tree.column('#0', width=400)
+        tree.column('files', width=100, anchor=tk.CENTER)
+        tree.column('size', width=150, anchor=tk.CENTER)
+        
+        # Scrollbar
+        scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscroll=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Popular tree
+        for ccusto, data in sorted(self.file_summary['folders'].items()):
+            tree.insert('', 'end', 
+                       text=f"✓ {ccusto}",
+                       values=(data['count'], self.app.format_size(data['size'])))
+        
+        # DESTINO
+        dest_frame = ttk.LabelFrame(main, text="🎯 Destino no Google Drive", padding=15)
+        dest_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        self.drive_path = tk.StringVar()
+        
+        # Tentar detectar Google Drive
+        detected = self.app.detect_google_drive_folder()
+        if detected:
+            self.drive_path.set(detected)
+            ttk.Label(dest_frame, 
+                     text=f"✓ Google Drive detectado automaticamente",
+                     foreground=self.app.colors['success'],
+                     font=('Segoe UI', 9)).pack(anchor=tk.W, pady=(0, 5))
+        
+        path_frame = ttk.Frame(dest_frame)
+        path_frame.pack(fill=tk.X)
+        
+        ttk.Label(path_frame, text="Pasta:").pack(side=tk.LEFT, padx=(0, 10))
+        
+        entry = ttk.Entry(path_frame, 
+                         textvariable=self.drive_path,
+                         font=('Segoe UI', 10))
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        
+        ttk.Button(path_frame,
+                  text="📁 Procurar...",
+                  command=self.select_drive_folder).pack(side=tk.LEFT)
+        
+        # OPÇÕES
+        options_frame = ttk.LabelFrame(main, text="⚙️ Opções", padding=15)
+        options_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        self.keep_local = tk.BooleanVar(value=True)
+        self.create_backup = tk.BooleanVar(value=False)
+        self.open_after = tk.BooleanVar(value=True)
+        
+        ttk.Checkbutton(options_frame,
+                       text="✓ Manter cópia local após upload",
+                       variable=self.keep_local).pack(anchor=tk.W, pady=2)
+        
+        ttk.Checkbutton(options_frame,
+                       text="✓ Criar backup antes de enviar (.zip)",
+                       variable=self.create_backup).pack(anchor=tk.W, pady=2)
+        
+        ttk.Checkbutton(options_frame,
+                       text="✓ Abrir pasta do Drive após conclusão",
+                       variable=self.open_after).pack(anchor=tk.W, pady=2)
+        
+        # BOTÕES
+        button_frame = ttk.Frame(main)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Button(button_frame,
+                  text="❌ Cancelar",
+                  command=self.window.destroy).pack(side=tk.LEFT)
+        
+        ttk.Button(button_frame,
+                  text="📂 Abrir Pasta Local",
+                  command=self.open_local_folder).pack(side=tk.LEFT, padx=(10, 0))
+        
+        ttk.Button(button_frame,
+                  text="📤 Enviar para Drive",
+                  style='Accent.TButton',
+                  command=self.start_upload).pack(side=tk.RIGHT)
+    
+    def select_drive_folder(self):
+        """Seleciona pasta do Google Drive"""
+        initial = self.drive_path.get() or self.app.last_dir
+        folder = filedialog.askdirectory(
+            title="Selecionar Pasta do Google Drive",
+            initialdir=initial
+        )
+        if folder:
+            self.drive_path.set(normalize_path(folder))
+    
+    def open_local_folder(self):
+        """Abre pasta local no explorador"""
+        try:
+            if platform.system() == 'Windows':
+                os.startfile(self.source_folder)
+            elif platform.system() == 'Darwin':  # macOS
+                subprocess.Popen(['open', self.source_folder])
+            else:  # Linux
+                subprocess.Popen(['xdg-open', self.source_folder])
+        except Exception as e:
+            messagebox.showerror("Erro", f"Não foi possível abrir a pasta: {e}")
+    
+    def start_upload(self):
+        """Inicia o processo de upload"""
+        drive_path = self.drive_path.get().strip()
+        
+        if not drive_path:
+            messagebox.showwarning("Aviso", "Selecione a pasta de destino no Google Drive!")
+            return
+        
+        if not os.path.exists(drive_path) or not os.path.isdir(drive_path):
+            messagebox.showerror("Erro", "Pasta de destino não encontrada!")
+            return
+        
+        # Confirmar
+        confirm_msg = f"Confirmar envio de {self.file_summary['total_files']} arquivo(s) para:\n\n{drive_path}\n\n"
+        if not self.keep_local.get():
+            confirm_msg += "⚠️ ATENÇÃO: Arquivos locais serão REMOVIDOS após o upload!\n\n"
+        confirm_msg += "Deseja continuar?"
+        
+        if not messagebox.askyesno("Confirmar Upload", confirm_msg):
+            return
+        
+        # Criar backup se solicitado
+        if self.create_backup.get():
+            try:
+                self.create_backup_zip()
+            except Exception as e:
+                if not messagebox.askyesno("Erro no Backup", 
+                    f"Erro ao criar backup: {e}\n\nContinuar mesmo assim?"):
+                    return
+        
+        # Fechar janela atual
+        self.window.destroy()
+        
+        # Abrir janela de progresso e iniciar upload
+        options = {
+            'keep_local': self.keep_local.get(),
+            'open_after': self.open_after.get()
+        }
+        
+        self.app.upload_to_drive(self.source_folder, drive_path, options)
+    
+    def create_backup_zip(self):
+        """Cria backup em ZIP da pasta de saída"""
+        import zipfile
+        
+        backup_name = f"backup_{os.path.basename(self.source_folder)}_{time.strftime('%Y%m%d_%H%M%S')}.zip"
+        backup_path = os.path.join(os.path.dirname(self.source_folder), backup_name)
+        
+        with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(self.source_folder):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, self.source_folder)
+                    zipf.write(file_path, arcname)
+        
+        self.app.write_log(f"✓ Backup criado: {backup_name}")
+
+
+class UploadProgressDialog:
+    """Janela de progresso durante upload"""
+    
+    def __init__(self, parent, app):
+        self.parent = parent
+        self.app = app
+        self.cancelled = False
+        self.paused = False
+        
+        # Criar janela
+        self.window = tk.Toplevel(parent)
+        self.window.title("📤 Enviando para Google Drive...")
+        self.window.geometry("650x350")
+        self.window.transient(parent)
+        self.window.grab_set()
+        self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # Centralizar
+        self.window.update_idletasks()
+        x = (self.window.winfo_screenwidth() // 2) - (650 // 2)
+        y = (self.window.winfo_screenheight() // 2) - (350 // 2)
+        self.window.geometry(f"+{x}+{y}")
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        main = ttk.Frame(self.window, padding=30)
+        main.pack(fill=tk.BOTH, expand=True)
+        
+        # Título
+        ttk.Label(main,
+                 text="📤 Enviando arquivos para Google Drive",
+                 font=('Segoe UI', 14, 'bold'),
+                 foreground=self.app.colors['primary_blue']).pack(pady=(0, 20))
+        
+        # Status
+        self.status_label = ttk.Label(main,
+                                     text="Preparando upload...",
+                                     font=('Segoe UI', 11))
+        self.status_label.pack(pady=(0, 15))
+        
+        # Barra de progresso
+        self.progress = ttk.Progressbar(main,
+                                       length=550,
+                                       mode='determinate')
+        self.progress.pack(pady=(0, 10))
+        
+        # Porcentagem
+        self.percent_label = ttk.Label(main,
+                                      text="0%",
+                                      font=('Segoe UI', 10, 'bold'),
+                                      foreground=self.app.colors['primary_blue'])
+        self.percent_label.pack()
+        
+        # Arquivo atual
+        self.current_file = ttk.Label(main,
+                                     text="",
+                                     font=('Segoe UI', 9),
+                                     foreground=self.app.colors['dark_gray'])
+        self.current_file.pack(pady=(15, 5))
+        
+        # Estatísticas
+        self.stats_label = ttk.Label(main,
+                                    text="0 / 0 arquivos • 0 MB / 0 MB",
+                                    font=('Segoe UI', 9))
+        self.stats_label.pack(pady=(0, 5))
+        
+        # Tempo estimado
+        self.time_label = ttk.Label(main,
+                                   text="Calculando tempo restante...",
+                                   font=('Segoe UI', 9),
+                                   foreground=self.app.colors['dark_gray'])
+        self.time_label.pack()
+        
+        # Botões
+        button_frame = ttk.Frame(main)
+        button_frame.pack(pady=(25, 0))
+        
+        self.cancel_btn = ttk.Button(button_frame,
+                                    text="❌ Cancelar",
+                                    command=self.cancel)
+        self.cancel_btn.pack(side=tk.LEFT, padx=5)
+    
+    def update_progress(self, current, total, current_file, bytes_sent, bytes_total, elapsed_time):
+        """Atualiza o progresso do upload"""
+        if self.cancelled:
+            return False
+        
+        try:
+            # Porcentagem
+            percent = (current / total) * 100 if total > 0 else 0
+            self.progress['value'] = percent
+            self.percent_label.config(text=f"{percent:.1f}%")
+            
+            # Status
+            self.status_label.config(text=f"Enviando arquivo {current} de {total}...")
+            
+            # Arquivo atual
+            self.current_file.config(text=f"📄 {os.path.basename(current_file)}")
+            
+            # Estatísticas
+            mb_sent = bytes_sent / (1024 * 1024)
+            mb_total = bytes_total / (1024 * 1024)
+            self.stats_label.config(
+                text=f"{current} / {total} arquivos • {mb_sent:.1f} MB / {mb_total:.1f} MB")
+            
+            # Tempo restante
+            if current > 0 and elapsed_time > 0:
+                avg_time_per_file = elapsed_time / current
+                remaining_files = total - current
+                remaining_time = avg_time_per_file * remaining_files
+                
+                if remaining_time < 60:
+                    time_str = f"~{int(remaining_time)}s restantes"
+                elif remaining_time < 3600:
+                    time_str = f"~{int(remaining_time / 60)}m restantes"
+                else:
+                    time_str = f"~{int(remaining_time / 3600)}h restantes"
+                
+                self.time_label.config(text=time_str)
+            
+            self.window.update()
+            return True
+            
+        except Exception as e:
+            print(f"Erro ao atualizar progresso: {e}")
+            return True
+    
+    def cancel(self):
+        """Cancela o upload"""
+        if messagebox.askyesno("Cancelar Upload", 
+                              "Tem certeza que deseja cancelar o upload?\n\nArquivos já enviados permanecerão no Drive."):
+            self.cancelled = True
+            self.status_label.config(text="❌ Cancelando...")
+            self.cancel_btn.config(state='disabled')
+    
+    def on_closing(self):
+        """Intercepta fechamento da janela"""
+        self.cancel()
+    
+    def close(self):
+        """Fecha a janela"""
+        try:
+            self.window.destroy()
+        except:
+            pass
+
+
+class UploadCompleteDialog:
+    """Relatório final após upload"""
+    
+    def __init__(self, parent, app, results):
+        self.parent = parent
+        self.app = app
+        self.results = results
+        
+        # Criar janela
+        self.window = tk.Toplevel(parent)
+        self.window.title("✅ Upload Concluído" if results['success'] > 0 else "⚠️ Upload com Problemas")
+        self.window.geometry("700x600")
+        self.window.transient(parent)
+        
+        # Centralizar
+        self.window.update_idletasks()
+        x = (self.window.winfo_screenwidth() // 2) - (700 // 2)
+        y = (self.window.winfo_screenheight() // 2) - (600 // 2)
+        self.window.geometry(f"+{x}+{y}")
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        main = ttk.Frame(self.window, padding=30)
+        main.pack(fill=tk.BOTH, expand=True)
+        
+        # Ícone e título
+        header = ttk.Frame(main)
+        header.pack(pady=(0, 20))
+        
+        if self.results['errors'] == 0:
+            icon_text = "✅"
+            title_text = "Upload Concluído com Sucesso!"
+            color = self.app.colors['success']
+        else:
+            icon_text = "⚠️"
+            title_text = "Upload Concluído com Avisos"
+            color = self.app.colors['warning']
+        
+        ttk.Label(header,
+                 text=icon_text,
+                 font=('Segoe UI', 48)).pack()
+        
+        ttk.Label(header,
+                 text=title_text,
+                 font=('Segoe UI', 16, 'bold'),
+                 foreground=color).pack()
+        
+        # Estatísticas
+        stats_frame = ttk.LabelFrame(main, text="📊 Estatísticas", padding=20)
+        stats_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        stats_text = f"""✓ {self.results['success']} arquivo(s) enviado(s) com sucesso
+✗ {self.results['errors']} erro(s)
+⏱️ Tempo total: {self.results['duration']}
+💾 Dados transferidos: {self.results['size_mb']} MB
+🔗 Destino: {os.path.basename(self.results['drive_url'])}"""
+        
+        ttk.Label(stats_frame, text=stats_text, justify=tk.LEFT).pack(anchor=tk.W)
+        
+        # Erros (se houver)
+        if self.results['errors'] > 0 and self.results.get('error_list'):
+            error_frame = ttk.LabelFrame(main, text="⚠️ Arquivos com Erro", padding=15)
+            error_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+            
+            # Lista de erros
+            error_text = scrolledtext.ScrolledText(error_frame, 
+                                                  height=10, 
+                                                  font=('Consolas', 9))
+            error_text.pack(fill=tk.BOTH, expand=True)
+            
+            for idx, error in enumerate(self.results['error_list'], 1):
+                error_text.insert(tk.END, f"{idx}. {os.path.basename(error['file'])}\n")
+                error_text.insert(tk.END, f"   Erro: {error['error']}\n\n")
+            
+            error_text.config(state='disabled')
+        
+        # Ações
+        action_frame = ttk.Frame(main)
+        action_frame.pack(pady=(10, 0))
+        
+        ttk.Button(action_frame,
+                  text="🔗 Abrir no Drive",
+                  command=lambda: self.open_drive(self.results['drive_url'])).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(action_frame,
+                  text="📄 Salvar Relatório",
+                  command=self.save_report).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(action_frame,
+                  text="✓ Fechar",
+                  style='Accent.TButton',
+                  command=self.window.destroy).pack(side=tk.LEFT, padx=5)
+    
+    def open_drive(self, drive_url):
+        """Abre pasta no explorador"""
+        try:
+            if platform.system() == 'Windows':
+                os.startfile(drive_url)
+            elif platform.system() == 'Darwin':
+                subprocess.Popen(['open', drive_url])
+            else:
+                subprocess.Popen(['xdg-open', drive_url])
+        except Exception as e:
+            messagebox.showerror("Erro", f"Não foi possível abrir a pasta: {e}")
+    
+    def save_report(self):
+        """Salva relatório em arquivo"""
+        try:
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[("Arquivo de Texto", "*.txt")],
+                initialfile=f"relatorio_upload_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+            )
+            
+            if file_path:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write("="*80 + "\n")
+                    f.write("RELATÓRIO DE UPLOAD PARA GOOGLE DRIVE\n")
+                    f.write("="*80 + "\n")
+                    f.write(f"Data/Hora: {time.strftime('%d/%m/%Y %H:%M:%S')}\n")
+                    f.write(f"Arquivos enviados: {self.results['success']}\n")
+                    f.write(f"Erros: {self.results['errors']}\n")
+                    f.write(f"Tempo total: {self.results['duration']}\n")
+                    f.write(f"Tamanho: {self.results['size_mb']} MB\n")
+                    f.write(f"Destino: {self.results['drive_url']}\n")
+                    f.write("="*80 + "\n\n")
+                    
+                    if self.results.get('error_list'):
+                        f.write("ERROS:\n")
+                        f.write("-"*80 + "\n")
+                        for idx, error in enumerate(self.results['error_list'], 1):
+                            f.write(f"{idx}. {error['file']}\n")
+                            f.write(f"   Erro: {error['error']}\n\n")
+                
+                messagebox.showinfo("Sucesso", "Relatório salvo com sucesso!")
+        
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao salvar relatório: {e}")
+
+
+# ==================== FUNÇÕES AUXILIARES ====================
+
 def normalize_account(conta):
     """Normaliza conta removendo caracteres. Ex: '52938-2' -> '529382'"""
     if conta is None:
@@ -485,6 +1032,10 @@ class App:
         self.processed_pdfs_file = "pdfs_processados.json"
         self.processed_pdfs = self.load_processed_pdfs()
         
+        # Controle de último processamento (para upload)
+        self.last_output_folder = None
+        self.last_process_stats = None
+        
         self.setup_ui()
     
     def load_processed_pdfs(self):
@@ -631,7 +1182,7 @@ class App:
         try:
             if Image and ImageTk:
                 logo_filename = self.themes[self.current_theme]['logo_file']
-                logo_path = os.path.join(os.path.dirname(__file__), logo_filename)
+                logo_path = resource_path(logo_filename)  # Usar resource_path()
                 if os.path.exists(logo_path):
                     logo_img = Image.open(logo_path)
                     # Resize logo to fit header (height ~60px)
@@ -643,6 +1194,9 @@ class App:
                     
                     self.logo_label = ttk.Label(header_frame, image=self.logo_image, background=self.colors['white'])
                     self.logo_label.pack(side=tk.LEFT, padx=(0, 15))
+                else:
+                    # Se logo não encontrada, apenas registrar no log (não quebrar a aplicação)
+                    print(f"Logo não encontrada: {logo_path}")
         except Exception as e:
             print(f"Logo loading warning: {e}")
             pass
@@ -740,6 +1294,9 @@ class App:
         # Process button and progress with enhanced styling
         controls = ttk.Frame(main)
         controls.pack(fill=tk.X, pady=(12, 8))
+        
+        # Salvar referência ao frame de controles para adicionar botão de upload depois
+        self.controls_frame = controls
         
         # Main action button with PD7Lab styling
         self.btn = ttk.Button(controls, text="▶ PROCESSAR COMPROVANTES", 
@@ -1677,6 +2234,257 @@ class App:
         
         return diagnostico
     
+    # ==================== GOOGLE DRIVE UPLOAD ====================
+    
+    def calculate_folder_summary(self, folder_path):
+        """Calcula resumo dos arquivos em uma pasta"""
+        summary = {
+            'total_files': 0,
+            'total_folders': 0,
+            'total_size': 0,
+            'folders': {}
+        }
+        
+        try:
+            for root, dirs, files in os.walk(folder_path):
+                for file in files:
+                    if file.endswith('.pdf'):
+                        file_path = os.path.join(root, file)
+                        file_size = os.path.getsize(file_path)
+                        
+                        # Pegar nome da subpasta (centro de custo)
+                        rel_path = os.path.relpath(root, folder_path)
+                        if rel_path == '.':
+                            ccusto = "Raiz"
+                        else:
+                            ccusto = rel_path
+                        
+                        if ccusto not in summary['folders']:
+                            summary['folders'][ccusto] = {
+                                'count': 0,
+                                'size': 0,
+                                'files': []
+                            }
+                        
+                        summary['folders'][ccusto]['count'] += 1
+                        summary['folders'][ccusto]['size'] += file_size
+                        summary['folders'][ccusto]['files'].append(file)
+                        
+                        summary['total_files'] += 1
+                        summary['total_size'] += file_size
+            
+            summary['total_folders'] = len(summary['folders'])
+            
+        except Exception as e:
+            self.write_log(f"⚠️ Erro ao calcular resumo: {e}")
+        
+        return summary
+    
+    def format_size(self, size_bytes):
+        """Formata tamanho em bytes para formato legível"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} TB"
+    
+    def detect_google_drive_folder(self):
+        """Tenta detectar pasta do Google Drive automaticamente"""
+        username = os.getlogin() if platform.system() == 'Windows' else os.path.expanduser("~").split('/')[-1]
+        
+        possible_paths = [
+            os.path.expanduser("~/Google Drive"),
+            os.path.expanduser("~/GoogleDrive"),
+            f"C:/Users/{username}/Google Drive",
+            f"C:/Users/{username}/GoogleDrive",
+            os.path.expanduser("~/Google Drive/My Drive"),
+            os.path.expanduser("~/OneDrive"),
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path) and os.path.isdir(path):
+                return path
+        
+        return None
+    
+    def open_drive_upload_dialog(self):
+        """Abre janela para revisar e enviar arquivos para Google Drive"""
+        if not self.last_output_folder or not os.path.exists(self.last_output_folder):
+            messagebox.showwarning("Aviso", "Nenhuma pasta de saída encontrada. Execute o processamento primeiro.")
+            return
+        
+        # Calcular resumo dos arquivos
+        summary = self.calculate_folder_summary(self.last_output_folder)
+        
+        if summary['total_files'] == 0:
+            messagebox.showinfo("Info", "Nenhum arquivo PDF encontrado na pasta de saída.")
+            return
+        
+        # Criar janela de diálogo
+        DriveUploadDialog(self.root, self, self.last_output_folder, summary)
+    
+    def upload_to_drive(self, source_folder, drive_destination, options):
+        """Faz upload dos arquivos para Google Drive (cópia para pasta sincronizada)"""
+        
+        # Coletar todos os arquivos
+        files_to_upload = []
+        total_size = 0
+        
+        try:
+            for root, dirs, files in os.walk(source_folder):
+                for file in files:
+                    if file.endswith('.pdf'):
+                        file_path = os.path.join(root, file)
+                        file_size = os.path.getsize(file_path)
+                        
+                        # Determinar pasta destino (manter estrutura de centro de custo)
+                        rel_path = os.path.relpath(root, source_folder)
+                        
+                        files_to_upload.append({
+                            'source': file_path,
+                            'destination': os.path.join(drive_destination, rel_path, file) if rel_path != '.' else os.path.join(drive_destination, file),
+                            'size': file_size,
+                            'ccusto': rel_path if rel_path != '.' else 'Raiz'
+                        })
+                        
+                        total_size += file_size
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao listar arquivos: {e}")
+            return
+        
+        if not files_to_upload:
+            messagebox.showinfo("Info", "Nenhum arquivo PDF encontrado para enviar.")
+            return
+        
+        # Criar janela de progresso
+        progress_dialog = UploadProgressDialog(self.root, self)
+        
+        # Variáveis de controle
+        uploaded = 0
+        errors = []
+        bytes_sent = 0
+        start_time = time.time()
+        
+        # Thread de upload
+        def upload_worker():
+            nonlocal uploaded, bytes_sent
+            
+            for i, file_info in enumerate(files_to_upload, 1):
+                # Verificar se foi cancelado
+                if progress_dialog.cancelled:
+                    break
+                
+                try:
+                    # Criar diretório destino se não existir
+                    dest_dir = os.path.dirname(file_info['destination'])
+                    os.makedirs(dest_dir, exist_ok=True)
+                    
+                    # Verificar se arquivo já existe
+                    if os.path.exists(file_info['destination']):
+                        # Comparar tamanhos
+                        src_size = os.path.getsize(file_info['source'])
+                        dst_size = os.path.getsize(file_info['destination'])
+                        
+                        if src_size == dst_size:
+                            # Arquivo idêntico, pular
+                            self.write_log(f"⏭️ Pulado (já existe): {os.path.basename(file_info['source'])}")
+                            uploaded += 1
+                            bytes_sent += file_info['size']
+                            continue
+                        else:
+                            # Arquivo diferente, criar nome alternativo
+                            base, ext = os.path.splitext(file_info['destination'])
+                            counter = 1
+                            while os.path.exists(file_info['destination']):
+                                file_info['destination'] = f"{base}_{counter}{ext}"
+                                counter += 1
+                    
+                    # Copiar arquivo
+                    shutil.copy2(file_info['source'], file_info['destination'])
+                    
+                    uploaded += 1
+                    bytes_sent += file_info['size']
+                    
+                    # Atualizar progresso
+                    elapsed = time.time() - start_time
+                    can_continue = progress_dialog.update_progress(
+                        current=i,
+                        total=len(files_to_upload),
+                        current_file=file_info['source'],
+                        bytes_sent=bytes_sent,
+                        bytes_total=total_size,
+                        elapsed_time=elapsed
+                    )
+                    
+                    if not can_continue:
+                        break
+                    
+                except Exception as e:
+                    errors.append({
+                        'file': file_info['source'],
+                        'error': str(e)
+                    })
+                    self.write_log(f"❌ Erro ao copiar {os.path.basename(file_info['source'])}: {e}")
+            
+            # Finalizar
+            duration = time.time() - start_time
+            
+            # Fechar janela de progresso
+            self.root.after(0, lambda: progress_dialog.close())
+            
+            # Remover pasta local se solicitado
+            if options.get('keep_local') == False and not progress_dialog.cancelled:
+                try:
+                    shutil.rmtree(source_folder)
+                    self.write_log(f"🗑️ Pasta local removida: {source_folder}")
+                except Exception as e:
+                    self.write_log(f"⚠️ Erro ao remover pasta local: {e}")
+            
+            # Mostrar resultado
+            results = {
+                'success': uploaded,
+                'errors': len(errors),
+                'error_list': errors,
+                'duration': str(timedelta(seconds=int(duration))),
+                'size_mb': round(total_size / (1024 * 1024), 2),
+                'drive_url': drive_destination,
+                'cancelled': progress_dialog.cancelled
+            }
+            
+            # Abrir pasta do Drive se solicitado
+            if options.get('open_after') and not progress_dialog.cancelled and uploaded > 0:
+                try:
+                    if platform.system() == 'Windows':
+                        os.startfile(drive_destination)
+                    elif platform.system() == 'Darwin':
+                        subprocess.Popen(['open', drive_destination])
+                    else:
+                        subprocess.Popen(['xdg-open', drive_destination])
+                except:
+                    pass
+            
+            # Mostrar relatório final
+            if not progress_dialog.cancelled:
+                self.root.after(0, lambda: UploadCompleteDialog(self.root, self, results))
+                
+                # Log resumo
+                self.write_log(f"\n{'='*50}")
+                self.write_log(f"📤 UPLOAD CONCLUÍDO")
+                self.write_log(f"{'='*50}")
+                self.write_log(f"✓ Enviados: {uploaded}")
+                self.write_log(f"✗ Erros: {len(errors)}")
+                self.write_log(f"⏱️ Tempo: {results['duration']}")
+                self.write_log(f"💾 Tamanho: {results['size_mb']} MB")
+                self.write_log(f"🔗 Destino: {drive_destination}")
+                self.write_log(f"{'='*50}")
+            else:
+                self.write_log(f"\n⚠️ Upload cancelado pelo usuário")
+                messagebox.showinfo("Cancelado", 
+                    f"Upload cancelado.\n\n{uploaded} de {len(files_to_upload)} arquivo(s) foram enviados antes do cancelamento.")
+        
+        # Iniciar thread de upload
+        threading.Thread(target=upload_worker, daemon=True).start()
+    
     def start(self):
         if not self.pdf_folder_var.get() or not self.excel_var.get():
             messagebox.showerror("Erro", "Selecione a pasta de PDFs e o Excel!")
@@ -2213,6 +3021,16 @@ class App:
             # Capturar as strings agora (evita capturar variáveis de escopo que podem não existir quando o lambda for executado)
             status_text = f"{total_ok}/{total_paginas_pdfs} extraídos"
             final_message = msg_resultado
+            
+            # Salvar estatísticas do último processamento para possível upload
+            self.last_output_folder = out_dir
+            self.last_process_stats = {
+                'total_files': total_ok,
+                'total_pages': total_paginas_pdfs,
+                'success': total_ok > 0,
+                'out_dir': out_dir
+            }
+            
             self.root.after(0, lambda s=status_text: self.status_var.set(s))
             self.root.after(0, lambda m=final_message: messagebox.showinfo("Concluído", m))
 
@@ -2236,6 +3054,20 @@ class App:
         self.prog.stop()
         self.btn.config(state='normal')
         self.status_var.set("Pronto")
+        
+        # Se houve processamento com sucesso, mostrar botão para upload ao Google Drive
+        if self.last_process_stats and self.last_process_stats.get('success'):
+            # Criar mensagem no log
+            self.write_log(f"\n💡 Dica: Você pode enviar os comprovantes para o Google Drive")
+            
+            # Adicionar botão de upload (se ainda não existir)
+            if not hasattr(self, 'upload_btn'):
+                self.upload_btn = ttk.Button(self.controls_frame,
+                                            text="📤 Enviar para Drive",
+                                            command=self.open_drive_upload_dialog,
+                                            width=20)
+                # Inserir após o botão principal
+                self.upload_btn.pack(after=self.btn, side=tk.LEFT, padx=(0, 15))
 
 
 if __name__ == "__main__":
