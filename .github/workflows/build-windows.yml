@@ -28,15 +28,15 @@ jobs:
           if (Test-Path 'requirements.txt') {
             pip install -r requirements.txt
           } else {
-            pip install pyinstaller pandas openpyxl xlrd pdfplumber PyPDF2
+            pip install pyinstaller pandas openpyxl xlrd pdfplumber PyPDF2 Pillow
           }
         shell: powershell
 
       - name: Build exe with PyInstaller
         shell: bash
         run: |
-          # Use onefile + windowed (no console) - adjust flags if you want console output
-          pyinstaller --noconfirm --onefile --windowed --name get_proof get_proof.py
+          # Use build_windows.spec que já inclui as logos
+          pyinstaller --noconfirm build_windows.spec
 
       - name: List dist
         run: dir dist || true
@@ -44,10 +44,9 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Extrator de PDF v1.0.0
+          name: PD7Lab_ExtractorPDF_v1.0.0
           path: |
-            dist/get_proof.exe
-            dist/get_proof.zip
+            dist/PD7Lab_ExtractorPDF.exe
 
       - name: ZIP dist (fallback)
         if: failure() || always()
